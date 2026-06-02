@@ -1,6 +1,6 @@
 """Long file detector.
 
-Docs: smells/long_file.py.doc.md
+Docs: long_file.doc.md
 """
 
 from __future__ import annotations

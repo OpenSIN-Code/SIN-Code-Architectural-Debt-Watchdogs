@@ -1,6 +1,6 @@
 """Dead code detector.
 
-Docs: smells/dead_code.py.doc.md
+Docs: dead_code.doc.md
 """
 
 from __future__ import annotations

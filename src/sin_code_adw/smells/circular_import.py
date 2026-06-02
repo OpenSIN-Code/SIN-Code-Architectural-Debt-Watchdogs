@@ -1,6 +1,6 @@
 """Circular import detector.
 
-Docs: smells/circular_import.py.doc.md
+Docs: circular_import.doc.md
 """
 
 from __future__ import annotations

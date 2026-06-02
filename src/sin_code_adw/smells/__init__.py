@@ -1,6 +1,6 @@
 """Code smell detectors package.
 
-Docs: smells/__init__.py.doc.md
+Docs: __init__.py.doc.md
 """
 
 from .god_function import detect as god_function

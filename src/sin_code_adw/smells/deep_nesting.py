@@ -1,6 +1,6 @@
 """Deep nesting detector.
 
-Docs: smells/deep_nesting.py.doc.md
+Docs: deep_nesting.doc.md
 """
 
 from __future__ import annotations

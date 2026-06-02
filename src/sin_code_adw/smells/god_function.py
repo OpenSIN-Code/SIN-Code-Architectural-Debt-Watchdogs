@@ -1,6 +1,6 @@
 """God function detector.
 
-Docs: smells/god_function.py.doc.md
+Docs: god_function.doc.md
 """
 
 from __future__ import annotations
