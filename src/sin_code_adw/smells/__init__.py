@@ -3,6 +3,10 @@
 Docs: __init__.py.doc.md
 """
 
+# Each detector exposes a top-level `detect(...)` function with the
+# signature expected by `ComplexityAnalyzer.analyze`. The aliases
+# `import as <name>` make the call sites in `complexity.py` read as
+# English (`reports.extend(god_function(...))`).
 from .god_function import detect as god_function
 from .long_file import detect as long_file
 from .circular_import import detect as circular_import

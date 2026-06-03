@@ -13,18 +13,31 @@ from ..report import DebtReport
 
 
 def detect(file_path: Path, tree: ast.AST, all_files: list[Path]) -> list[DebtReport]:
-    """Detect simple circular imports via naive module name matching."""
+    """Detect simple circular imports via naive module name matching.
+
+    Args:
+        file_path: The file under analysis.
+        tree: Pre-parsed AST of `file_path`.
+        all_files: Every Python file in the project (for cross-file checks).
+
+    Returns:
+        A list of `DebtReport` records. Empty if no cycles are found.
+    """
     reports = []
     imports = _extract_imports(tree)
     own_module = _module_name(file_path)
     for imp in imports:
-        # Check if any other file in project imports this file
+        # Walk the project to find any file that itself imports `imp`.
+        # For each match, check whether that file also imports us back.
+        # The first match per `imp` triggers a report (we `break`).
         for other in all_files:
             if other == file_path:
                 continue
             other_module = _module_name(other)
             if other_module == imp:
-                # Check if other imports this file
+                # Re-parse `other` for its import list. Swallow parse
+                # errors silently — a broken file is the user's problem,
+                # not a cycle signal.
                 try:
                     other_tree = ast.parse(other.read_text(encoding="utf-8", errors="replace"))
                 except Exception:
@@ -47,6 +60,12 @@ def detect(file_path: Path, tree: ast.AST, all_files: list[Path]) -> list[DebtRe
 
 
 def _extract_imports(tree: ast.AST) -> list[str]:
+    """Return the list of imported module names from a parsed AST.
+
+    Includes both `import x.y.z` and `from x.y import z` cases.
+    Relative imports (`from . import x`) are ignored because their
+    resolved name depends on package context we don't have here.
+    """
     imports = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -59,5 +78,10 @@ def _extract_imports(tree: ast.AST) -> list[str]:
 
 
 def _module_name(file_path: Path) -> str:
-    """Convert file path to dotted module name (naive)."""
+    """Convert file path to a module name.
+
+    Currently uses just `file_path.stem` (file name without extension).
+    This is intentionally naive — a future revision should walk
+    parents to construct a dotted package name.
+    """
     return file_path.stem

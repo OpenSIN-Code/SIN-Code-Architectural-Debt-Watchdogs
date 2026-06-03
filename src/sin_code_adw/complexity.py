@@ -16,6 +16,21 @@ from .debt_score import DebtScorer
 from .smells import god_function, long_file, circular_import, dead_code, deep_nesting as deep_nesting_fn
 
 
+# Default thresholds. Each value is the upper bound; values *equal* to
+# the threshold are accepted (the check is `>`, not `>=`). Tuned for
+# a mid-sized Python codebase — tighten for stricter policies.
+_DEFAULT_THRESHOLDS: dict[str, int] = {
+    "cyclomatic": 10,
+    "cognitive": 15,
+    "file_lines": 500,
+    "function_lines": 50,
+    "halstead_volume": 1500,
+    "halstead_difficulty": 20,
+    "deep_nesting": 4,
+    "fan_in": 20,
+}
+
+
 class ComplexityAnalyzer:
     """Static analysis for complexity metrics and code smells.
 
@@ -23,16 +38,14 @@ class ComplexityAnalyzer:
     """
 
     def __init__(self, thresholds: dict | None = None):
-        self.thresholds = {
-            "cyclomatic": 10,
-            "cognitive": 15,
-            "file_lines": 500,
-            "function_lines": 50,
-            "halstead_volume": 1500,
-            "halstead_difficulty": 20,
-            "deep_nesting": 4,
-            "fan_in": 20,
-        }
+        """Initialize the analyzer.
+
+        Args:
+            thresholds: Optional override for any subset of the default
+                thresholds. Keys you don't supply keep their default.
+        """
+        # Shallow copy so the module-level dict is never mutated by callers.
+        self.thresholds = dict(_DEFAULT_THRESHOLDS)
         if thresholds:
             self.thresholds.update(thresholds)
         self._scorer = DebtScorer()
@@ -40,14 +53,24 @@ class ComplexityAnalyzer:
     # ── Public API ──────────────────────────────────────────────────────
 
     def analyze(self, root: str | Path, exclude: set[str] | None = None) -> list[DebtReport]:
-        """Return list of debt items found in *root*."""
+        """Return list of debt items found in *root*.
+
+        Args:
+            root: Path to the project root. Walked recursively.
+            exclude: Directory names to skip during walk. Matched
+                against any path component.
+
+        Returns:
+            List of `DebtReport` records. The list may contain both
+            file-level and per-function/per-class items.
+        """
         root = Path(root)
         exclude = exclude or set()
         reports: list[DebtReport] = []
 
         python_files = self._collect_python_files(root, exclude)
 
-        # Build fan-in index for coupling analysis
+        # Build fan-in index for coupling analysis (one O(N×M) pass)
         fan_in_map = self._build_fan_in_index(python_files)
 
         for file_path in python_files:
@@ -55,6 +78,9 @@ class ComplexityAnalyzer:
                 source = file_path.read_text(encoding="utf-8", errors="replace")
                 tree = ast.parse(source)
             except (SyntaxError, UnicodeDecodeError):
+                # Skip files we can't parse; a syntax-broken file is
+                # already a problem for the user and our metrics would
+                # be meaningless anyway.
                 continue
 
             # File-level smells
@@ -70,13 +96,11 @@ class ComplexityAnalyzer:
                     reports.extend(self._cyclomatic_report(file_path, node))
                     reports.extend(self._cognitive_report(file_path, node))
 
-            # Circular imports
+            # Module-level smells (cross-file analysis is the smell detector's job)
             reports.extend(circular_import(file_path, tree, python_files))
-
-            # Dead code
             reports.extend(dead_code(file_path, tree, python_files))
 
-            # High fan-in
+            # High fan-in (coupling signal)
             stem = file_path.stem
             fi = fan_in_map.get(stem, 0)
             if fi > self.thresholds["fan_in"]:
@@ -95,21 +119,28 @@ class ComplexityAnalyzer:
         return reports
 
     def debt_score(self, reports: list[DebtReport]) -> dict[str, Any]:
-        """Return overall debt score {total, breakdown, top_offenders, grade}."""
+        """Return overall debt score `{total, breakdown, top_offenders, grade}`."""
         return self._scorer.compute(reports)
 
     # ── Internal helpers ─────────────────────────────────────────────────
 
     def _collect_python_files(self, root: Path, exclude: set[str]) -> list[Path]:
+        """Walk `root` and return a sorted list of `.py` paths not in `exclude`."""
         files = []
         for p in root.rglob("*.py"):
+            # Match `exclude` against any path component so `{"venv"}` skips
+            # both `./venv/...` and `./src/venv/...`.
             if any(part in exclude for part in p.parts):
                 continue
             files.append(p)
         return sorted(files)
 
     def _build_fan_in_index(self, files: list[Path]) -> dict[str, int]:
-        """Map module name → number of files that import it."""
+        """Map module name → number of files that import it.
+
+        Uses the top-level `Import` / `ImportFrom` AST nodes. Module
+        names are recorded as-is (no dotted-path resolution).
+        """
         counts: dict[str, int] = {}
         for fp in files:
             try:
@@ -121,6 +152,9 @@ class ComplexityAnalyzer:
                     for alias in node.names:
                         counts[alias.name] = counts.get(alias.name, 0) + 1
                 elif isinstance(node, ast.ImportFrom):
+                    # `node.module` is None for `from . import x`; we
+                    # skip those because the relative target is ambiguous
+                    # without a package context.
                     mod = node.module or ""
                     counts[mod] = counts.get(mod, 0) + 1
         return counts
@@ -128,6 +162,7 @@ class ComplexityAnalyzer:
     # ── Cyclomatic complexity ────────────────────────────────────────────
 
     def _cyclomatic_report(self, file_path: Path, node: ast.AST) -> list[DebtReport]:
+        """Emit a report if the node's McCabe complexity exceeds the threshold."""
         score = self._cyclomatic_score(node)
         if score > self.thresholds["cyclomatic"]:
             return [
@@ -154,12 +189,14 @@ class ComplexityAnalyzer:
             elif isinstance(child, (ast.And, ast.Or)):
                 score += 1
             elif isinstance(child, ast.comprehension):
+                # Each `for` / `if` in a comprehension is a decision point.
                 score += 1
         return score
 
     # ── Cognitive complexity ─────────────────────────────────────────────
 
     def _cognitive_report(self, file_path: Path, node: ast.AST) -> list[DebtReport]:
+        """Emit a report if the node's cognitive complexity exceeds the threshold."""
         score = self._cognitive_score(node)
         if score > self.thresholds["cognitive"]:
             return [
@@ -176,7 +213,12 @@ class ComplexityAnalyzer:
         return []
 
     def _cognitive_score(self, node: ast.AST, nesting: int = 0) -> int:
-        """Simplified Sonar-style cognitive complexity."""
+        """Simplified Sonar-style cognitive complexity.
+
+        Each control-flow structure adds `1 + current_nesting` to the
+        score (deeper nesting is harder to read). Short-circuit `and` /
+        `or` add a flat `1` because they don't introduce new scopes.
+        """
         score = 0
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.If, ast.While, ast.For, ast.With, ast.ExceptHandler)):
@@ -185,7 +227,7 @@ class ComplexityAnalyzer:
             elif isinstance(child, (ast.And, ast.Or)):
                 score += 1
             elif isinstance(child, ast.FunctionDef):
-                # nested function adds 1 + nesting
+                # nested function adds 1 + nesting (a closure is "more to think about")
                 score += 1 + nesting
                 score += self._cognitive_score(child, nesting + 1)
             else:
@@ -195,6 +237,7 @@ class ComplexityAnalyzer:
     # ── Halstead metrics ───────────────────────────────────────────────
 
     def _halstead_report(self, file_path: Path, node: ast.AST) -> list[DebtReport]:
+        """Emit reports for Halstead volume / difficulty over the thresholds."""
         h = self._halstead_metrics(node)
         reports = []
         if h["volume"] > self.thresholds["halstead_volume"]:
@@ -224,7 +267,18 @@ class ComplexityAnalyzer:
         return reports
 
     def _halstead_metrics(self, node: ast.AST) -> dict[str, float]:
-        """Compute Halstead Volume, Difficulty, and Effort for a node."""
+        """Compute Halstead Volume, Difficulty, and Effort for a node.
+
+        Definitions:
+        - `eta1` = number of distinct operators
+        - `eta2` = number of distinct operands
+        - `N1`   = total operator occurrences
+        - `N2`   = total operand occurrences
+        - `N`    = N1 + N2
+        - `volume` = N * log2(eta1 + eta2)
+        - `difficulty` = (eta1/2) * (N2/eta2)
+        - `effort` = volume * difficulty
+        """
         operators = set()
         operands = set()
         n1 = n2 = N1 = N2 = 0
@@ -261,9 +315,11 @@ class ComplexityAnalyzer:
                 n2 += 1
                 N2 += 1
 
+        # Clamp to 1 to avoid log(0) / div-by-zero on trivially small nodes.
         eta1 = max(len(operators), 1)
         eta2 = max(len(operands), 1)
         N = max(n1 + n2, 1)
+        # log2(1) = 0 so we get volume 0 for empty operator+operand sets.
         volume = N * math.log2(eta1 + eta2) if (eta1 + eta2) > 1 else 0.0
         difficulty = (eta1 / 2) * (N2 / max(eta2, 1))
         effort = volume * difficulty
